@@ -1,0 +1,777 @@
+---
+title: "Mini-projet — Séries temporelles financières"
+subtitle: "Sections 1 à 3 : préparation, exploration et modélisation classique (AAPL et QQQ)"
+author: "À compléter"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+lang: fr
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.width = 8, fig.height = 4.5, fig.align = "center"
+)
+```
+
+<!--
+NOTE : les valeurs numériques citées dans le texte proviennent de l'exécution du 11/10/2026
+(données Yahoo Finance du 02/01/2019 au 30/09/2026). Si tu retélécharges les données,
+vérifie que les chiffres du texte correspondent toujours aux sorties.
+Les interprétations de graphiques (ACF/PACF, décomposition, volatilité GARCH) ont été relues sur les figures de cette exécution.
+-->
+
+# Introduction
+
+## Thématique, séries retenues et question de modélisation
+
+Ce rapport étudie la thématique **Finance** sur deux séries journalières : l'action **Apple (AAPL)** et l'ETF **QQQ**, qui réplique l'indice Nasdaq-100 dont Apple est une composante. Ce choix est justifié par deux raisons : (i) les rendements financiers présentent une variance conditionnelle qui évolue dans le temps, ce qui permet d'illustrer ARCH/GARCH ; (ii) une action et son indice sont deux séries fortement corrélées, ce qui convient à l'étude d'un VAR, de la causalité de Granger et de la cointégration.
+
+La question de modélisation est la suivante : **comment modéliser la dynamique du niveau, des rendements et de la volatilité d'AAPL, et existe-t-il une relation d'interdépendance ou d'équilibre de long terme avec QQQ ?** Le rapport s'arrête à la section 3 du mini-projet (modélisation classique et diagnostics) ; la prévision comparative relève de la section 6.
+
+## Source des données
+
+- **Source** : Yahoo Finance, récupérée avec le package R `quantmod` (`getSymbols`).
+- **Période** : du 02/01/2019 au 30/09/2026, fréquence journalière (jours de bourse).
+- **Transformation déjà appliquée par le fournisseur** : on utilise le prix **ajusté** (`Adjusted`), que Yahoo corrige des dividendes et des fractionnements d'actions. Ces prix sont révisés rétroactivement par Yahoo ; les données téléchargées sont donc sauvegardées dans un fichier `.rds` pour que les résultats soient reproductibles.
+
+# 1. Préparation et exploration des données
+
+## 1.1. Packages
+
+Les packages doivent être installés une seule fois. Si nécessaire, décommentez la ligne `install.packages(packages)` puis exécutez-la dans la console R.
+
+```{r packages}
+packages <- c(
+  "quantmod", "xts", "zoo", "tseries", "forecast",
+  "ggplot2", "FinTS", "moments", "urca", "vars", "rugarch"
+)
+# install.packages(packages)
+
+library(quantmod)
+library(xts)
+library(zoo)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(FinTS)
+library(moments)
+library(urca)
+library(vars)
+library(rugarch)
+
+set.seed(42)
+```
+
+## 1.2. Téléchargement des données
+
+Les prix ajustés sont utilisés pour l'analyse des niveaux de prix. Le volume quotidien est également téléchargé. Le téléchargement n'est fait qu'une fois : les exécutions suivantes relisent le fichier sauvegardé, ce qui garantit des résultats identiques (reproductibilité).
+
+```{r download}
+fichier_donnees <- "donnees_aapl_qqq.rds"
+
+if (file.exists(fichier_donnees)) {
+  donnees <- readRDS(fichier_donnees)
+  AAPL_data <- donnees$AAPL
+  QQQ_data  <- donnees$QQQ
+} else {
+  AAPL_data <- getSymbols(
+    "AAPL", src = "yahoo",
+    from = "2019-01-01", to = "2026-10-01",
+    auto.assign = FALSE
+  )
+  QQQ_data <- getSymbols(
+    "QQQ", src = "yahoo",
+    from = "2019-01-01", to = "2026-10-01",
+    auto.assign = FALSE
+  )
+  saveRDS(list(AAPL = AAPL_data, QQQ = QQQ_data), fichier_donnees)
+}
+
+prices <- merge(AAPL = Ad(AAPL_data), QQQ = Ad(QQQ_data))
+volume <- merge(AAPL = Vo(AAPL_data), QQQ = Vo(QQQ_data))
+
+head(prices)
+tail(prices)
+```
+
+## 1.3. Vérification des données
+
+```{r check}
+cat("Nombre de lignes :", NROW(prices), "\n")
+cat("Nombre de colonnes :", NCOL(prices), "\n")
+cat("Première date :", as.character(first(index(prices))), "\n")
+cat("Dernière date :", as.character(last(index(prices))), "\n")
+
+cat("\nValeurs manquantes dans les prix :\n")
+print(colSums(is.na(prices)))
+cat("\nValeurs manquantes dans les volumes :\n")
+print(colSums(is.na(volume)))
+
+cat("\nNombre de dates dupliquées :", sum(duplicated(index(prices))), "\n")
+cat("Dates dans l'ordre chronologique :", !is.unsorted(index(prices)), "\n")
+```
+
+**Interprétation.** Le jeu de données contient 1 947 observations journalières entre le 02/01/2019 et le 30/09/2026, soit plus de 7 ans (le minimum demandé est de 5 ans). Il n'y a aucune valeur manquante, aucune date dupliquée et les dates sont bien ordonnées : les données sont directement utilisables comme séries temporelles `xts` avec un index de dates explicite.
+
+## 1.4. Visualisation des prix
+
+```{r plot-prices}
+plot(prices[, "AAPL.Adjusted"],
+     main = "Prix ajusté de AAPL", xlab = "Date",
+     ylab = "Prix ajusté", col = "blue")
+
+plot(prices[, "QQQ.Adjusted"],
+     main = "Prix ajusté de QQQ", xlab = "Date",
+     ylab = "Prix ajusté", col = "red")
+
+plot(prices[, "AAPL.Adjusted"],
+     main = "Évolution des prix ajustés AAPL et QQQ",
+     xlab = "Date", ylab = "Prix ajusté", col = "blue")
+lines(prices[, "QQQ.Adjusted"], col = "red")
+legend("topleft", legend = c("AAPL", "QQQ"),
+       col = c("blue", "red"), lty = 1)
+```
+
+**Interprétation.** Les deux prix suivent une tendance haussière de long terme (AAPL passe d'environ 37 à environ 333 ; QQQ d'environ 148 à environ 740) avec des phases de baisse marquées, sans cycle saisonnier régulier visible. Les deux séries évoluent globalement dans le même sens, ce qui est cohérent avec le fait qu'Apple est une composante de l'indice. Les échelles étant différentes, la comparaison sur un même graphique doit être interprétée avec prudence.
+
+## 1.5. Rendements logarithmiques
+
+Le rendement logarithmique est défini par $r_t = \log(P_t)-\log(P_{t-1})$. Il mesure la variation relative d'une séance à la suivante.
+
+```{r returns}
+returns <- na.omit(diff(log(prices)))
+head(returns)
+
+plot(returns[, "AAPL.Adjusted"],
+     main = "Rendements logarithmiques de AAPL",
+     xlab = "Date", ylab = "Rendement logarithmique", col = "blue")
+
+plot(returns[, "QQQ.Adjusted"],
+     main = "Rendements logarithmiques de QQQ",
+     xlab = "Date", ylab = "Rendement logarithmique", col = "red")
+```
+
+**Interprétation.** Contrairement aux prix, les rendements fluctuent autour de zéro sans tendance. On observe des **regroupements de volatilité** (périodes calmes suivies de périodes agitées), ce qui annonce des effets ARCH/GARCH qui seront testés en section 3.
+
+## 1.6. Moyenne mobile et volatilité glissante
+
+La moyenne mobile sur 20 séances lisse les variations du prix. L'écart-type glissant sur 20 séances résume la variabilité récente des rendements.
+
+```{r ma-vol}
+AAPL_MA20 <- rollapply(
+  prices[, "AAPL.Adjusted"], width = 20,
+  FUN = mean, align = "right", fill = NA
+)
+
+plot(prices[, "AAPL.Adjusted"],
+     main = "AAPL et moyenne mobile sur 20 séances",
+     xlab = "Date", ylab = "Prix ajusté", col = "blue")
+lines(AAPL_MA20, col = "red")
+legend("topleft", legend = c("AAPL", "Moyenne mobile 20 séances"),
+       col = c("blue", "red"), lty = 1)
+
+rolling_volatility <- rollapply(
+  returns[, "AAPL.Adjusted"], width = 20,
+  FUN = sd, align = "right", fill = NA
+)
+
+plot(rolling_volatility,
+     main = "Volatilité glissante de AAPL sur 20 séances",
+     xlab = "Date", ylab = "Écart-type glissant des rendements",
+     col = "darkgreen")
+```
+
+**Interprétation.** La moyenne mobile suit la tendance du prix avec un léger retard et lisse le bruit quotidien. La volatilité glissante n'est pas constante : elle alterne des périodes de faible et de forte volatilité, ce qui confirme visuellement l'hétéroscédasticité conditionnelle. Ces deux indicateurs dérivés (moyenne mobile et volatilité réalisée) répondent à l'exigence d'au moins un indicateur technique.
+
+## 1.7. Statistiques descriptives et valeurs extrêmes
+
+```{r desc}
+cat("Résumé des rendements AAPL :\n")
+print(summary(as.numeric(returns[, "AAPL.Adjusted"])))
+cat("Skewness AAPL :", skewness(as.numeric(returns[, "AAPL.Adjusted"])), "\n")
+cat("Kurtosis AAPL :", kurtosis(as.numeric(returns[, "AAPL.Adjusted"])), "\n")
+
+cat("\nRésumé des rendements QQQ :\n")
+print(summary(as.numeric(returns[, "QQQ.Adjusted"])))
+cat("Skewness QQQ :", skewness(as.numeric(returns[, "QQQ.Adjusted"])), "\n")
+cat("Kurtosis QQQ :", kurtosis(as.numeric(returns[, "QQQ.Adjusted"])), "\n")
+
+cat("\nQuantiles des rendements AAPL :\n")
+print(quantile(as.numeric(returns[, "AAPL.Adjusted"]),
+               probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE))
+cat("Écart-type AAPL :", sd(as.numeric(returns[, "AAPL.Adjusted"]), na.rm = TRUE), "\n")
+cat("Moyenne AAPL :", mean(as.numeric(returns[, "AAPL.Adjusted"]), na.rm = TRUE), "\n")
+
+boxplot(as.numeric(returns[, "AAPL.Adjusted"]),
+        main = "Valeurs extrêmes des rendements AAPL", horizontal = TRUE)
+boxplot(as.numeric(returns[, "QQQ.Adjusted"]),
+        main = "Valeurs extrêmes des rendements QQQ", horizontal = TRUE)
+```
+
+**Interprétation.**
+
+- Le rendement moyen quotidien est faible (≈ 0,11 % pour AAPL, ≈ 0,08 % pour QQQ) par rapport à la dispersion (écart-type d'AAPL ≈ 1,93 %).
+- La **kurtosis** vaut ≈ 9,49 (AAPL) et ≈ 10,26 (QQQ), alors qu'elle vaut 3 pour une loi normale : les queues sont nettement plus épaisses que celles d'une loi normale. L'asymétrie est légèrement négative (≈ −0,12 pour AAPL, ≈ −0,37 pour QQQ) : les fortes baisses sont un peu plus marquées que les fortes hausses, surtout pour l'indice.
+- Les boxplots signalent de nombreux points extrêmes (rendements de −13,8 % à +14,3 % pour AAPL).
+
+**Traitement des valeurs aberrantes : conservation.** Ces valeurs extrêmes ne sont ni supprimées ni corrigées : elles correspondent à de vrais mouvements de marché (épisodes de forte volatilité) et non à des erreurs de saisie (aucune valeur manquante ni incohérence dans la vérification de la section 1.3). Les supprimer biaiserait l'estimation de la volatilité, qui est précisément l'objet du modèle GARCH. On en tient compte en choisissant une loi à queues épaisses (Student) pour le GARCH.
+
+## 1.8. Jeu de données final et séparation train/test
+
+Les colonnes des prix, rendements et indicateurs sont réunies dans un seul jeu de données. La séparation est chronologique (90 % / 10 %) : les observations de test sont postérieures aux observations d'entraînement.
+
+```{r dataset}
+dataset <- merge(
+  prices[, "AAPL.Adjusted"],
+  prices[, "QQQ.Adjusted"],
+  returns[, "AAPL.Adjusted"],
+  returns[, "QQQ.Adjusted"],
+  AAPL_MA20,
+  rolling_volatility
+)
+
+colnames(dataset) <- c(
+  "AAPL", "QQQ", "AAPL_Return", "QQQ_Return",
+  "AAPL_MA20", "AAPL_Volatility20"
+)
+
+head(dataset)
+str(dataset)
+colSums(is.na(dataset))
+
+split_index <- floor(NROW(dataset) * 0.90)
+train <- dataset[1:split_index, ]
+test  <- dataset[(split_index + 1):NROW(dataset), ]
+
+cat("Nombre d'observations train :", NROW(train), "\n")
+cat("Nombre d'observations test :", NROW(test), "\n")
+cat("Train jusqu'au :", as.character(last(index(train))), "\n")
+cat("Test à partir du :", as.character(first(index(test))), "\n")
+```
+
+**Interprétation.** L'échantillon d'apprentissage contient 1 752 observations (du 02/01/2019 au 18/12/2025) et l'échantillon de test 195 observations (du 19/12/2025 au 30/09/2026). Toutes les estimations de la section 3 utilisent **uniquement** l'échantillon d'apprentissage afin d'éviter toute fuite d'information. Les valeurs manquantes (1 pour les rendements, 19 pour la moyenne mobile, 20 pour la volatilité glissante) sont attendues : ces calculs nécessitent des observations antérieures.
+
+# 2. Analyse exploratoire et stationnarité
+
+## 2.1. ACF et PACF
+
+L'ACF décrit la corrélation d'une série avec ses retards. La PACF mesure la corrélation à un retard donné après prise en compte des retards intermédiaires.
+
+```{r acf-pacf}
+acf(na.omit(train[, "AAPL"]), lag.max = 40, main = "ACF - Prix AAPL brut")
+pacf(na.omit(train[, "AAPL"]), lag.max = 40, main = "PACF - Prix AAPL brut")
+
+AAPL_diff <- na.omit(diff(train[, "AAPL"]))
+acf(as.numeric(AAPL_diff), lag.max = 40, main = "ACF - Prix AAPL différencié")
+pacf(as.numeric(AAPL_diff), lag.max = 40, main = "PACF - Prix AAPL différencié")
+
+acf(na.omit(train[, "AAPL_Return"]), lag.max = 40, main = "ACF - Rendements AAPL")
+pacf(na.omit(train[, "AAPL_Return"]), lag.max = 40, main = "PACF - Rendements AAPL")
+
+acf(na.omit(train[, "QQQ_Return"]), lag.max = 40, main = "ACF - Rendements QQQ")
+pacf(na.omit(train[, "QQQ_Return"]), lag.max = 40, main = "PACF - Rendements QQQ")
+```
+
+**Interprétation.**
+
+- **Prix bruts** : l'ACF décroît très lentement (les autocorrélations restent proches de 1 sur de nombreux retards) et la PACF ne présente qu'un pic au retard 1. C'est la signature d'une série non stationnaire de type marche aléatoire, qui nécessite une différenciation.
+- **Prix différenciés** : l'ACF est entièrement dans les bandes de confiance à 95 % (hors retard 0) et la PACF n'en sort que de très peu, à quelques retards isolés (autour des retards 3, 10 et 18, avec des valeurs d'environ ±0,05). Sur 40 retards, environ 2 dépassements par pur hasard sont attendus au seuil de 5 % : il n'y a donc **pas de structure AR ou MA exploitable**. Ce constat est confirmé numériquement par le test de Ljung-Box de la section 3.2.
+- **Rendements logarithmiques** : l'autocorrélation reste **faible** (inférieure à 0,15 en valeur absolue), mais quelques pics sortent des bandes. Pour AAPL, l'ACF et la PACF montrent une corrélation négative au retard 1 (≈ −0,08) et des pics aux retards 8 (≈ −0,08) et 9 (≈ +0,09). Pour QQQ, la corrélation négative au retard 1 est plus nette (≈ −0,12 à −0,13), avec des pics aux retards 7 (≈ +0,08 à +0,09) et 9 (≈ +0,11 à +0,13). Ces rendements ne sont donc pas exactement un bruit blanc, mais la dépendance linéaire est de très faible amplitude. Ces pics aux retards 1 et 7-9 sont cohérents avec les ordres proposés par les critères du VAR (section 3.4 : 1 retard pour le BIC, 9 retards pour l'AIC).
+- Les prix différenciés (en dollars) et les rendements (en pourcentage) ne donnent pas exactement la même image, car la différence en dollars est dominée par les périodes où le prix est élevé (surtout 2024-2025), alors que le rendement pèse également toutes les périodes.
+- La dépendance la plus forte n'est pas dans la moyenne mais dans la **variance** (section 3.6).
+
+## 2.2. Tests ADF
+
+L'hypothèse nulle du test ADF est la présence d'une racine unitaire. Une p-value inférieure à 0,05 conduit à rejeter cette hypothèse au seuil de 5 %.
+
+```{r adf}
+adf_test <- function(series, name) {
+  result <- adf.test(as.numeric(na.omit(series)))
+  cat("Série :", name, "\n")
+  cat("Statistique ADF :", as.numeric(result$statistic), "\n")
+  cat("p-value :", result$p.value, "\n")
+  if (result$p.value < 0.05) {
+    cat("Conclusion : rejet de l'hypothèse de racine unitaire au seuil de 5 %.\n\n")
+  } else {
+    cat("Conclusion : on ne rejette pas l'hypothèse de racine unitaire au seuil de 5 %.\n\n")
+  }
+  invisible(result)
+}
+
+adf_test(train[, "AAPL"], "Prix AAPL")
+adf_test(train[, "AAPL_Return"], "Rendements AAPL")
+adf_test(train[, "QQQ"], "Prix QQQ")
+adf_test(train[, "QQQ_Return"], "Rendements QQQ")
+```
+
+## 2.3. Tests KPSS
+
+Le test KPSS utilise l'hypothèse nulle inverse : la stationnarité autour d'un niveau constant. Une p-value inférieure à 0,05 conduit à rejeter cette hypothèse.
+
+```{r kpss}
+kpss_test <- function(series, name) {
+  result <- kpss.test(as.numeric(na.omit(series)), null = "Level")
+  cat("Série :", name, "\n")
+  cat("Statistique KPSS :", as.numeric(result$statistic), "\n")
+  cat("p-value :", result$p.value, "\n")
+  if (result$p.value < 0.05) {
+    cat("Conclusion : rejet de l'hypothèse de stationnarité au seuil de 5 %.\n\n")
+  } else {
+    cat("Conclusion : on ne rejette pas l'hypothèse de stationnarité au seuil de 5 %.\n\n")
+  }
+  invisible(result)
+}
+
+kpss_test(train[, "AAPL"], "Prix AAPL")
+kpss_test(train[, "AAPL_Return"], "Rendements AAPL")
+kpss_test(train[, "QQQ"], "Prix QQQ")
+kpss_test(train[, "QQQ_Return"], "Rendements QQQ")
+```
+
+## 2.4. Tests sur les prix différenciés
+
+La différence simple $P_t-P_{t-1}$ n'est pas identique au rendement logarithmique $\log(P_t)-\log(P_{t-1})$. Les tests suivants étudient la stationnarité après différenciation simple.
+
+```{r tests-diff}
+AAPL_diff <- na.omit(diff(train[, "AAPL"]))
+QQQ_diff  <- na.omit(diff(train[, "QQQ"]))
+
+adf.test(as.numeric(AAPL_diff))
+adf.test(as.numeric(QQQ_diff))
+
+kpss.test(as.numeric(AAPL_diff), null = "Level")
+kpss.test(as.numeric(QQQ_diff), null = "Level")
+```
+
+**Synthèse et conclusion sur l'ordre de différenciation.** Les deux tests ont des hypothèses nulles opposées et doivent donc converger pour conclure :
+
+| Série | ADF (H0 : racine unitaire) | KPSS (H0 : stationnarité) | Conclusion |
+|---|---|---|---|
+| Prix AAPL | −2,85 ; p = 0,217 (non rejet) | 17,64 ; p ≤ 0,01 (rejet) | non stationnaire |
+| Prix QQQ | −1,77 ; p = 0,675 (non rejet) | 16,18 ; p ≤ 0,01 (rejet) | non stationnaire |
+| Prix AAPL différenciés | −12,05 ; p ≤ 0,01 (rejet) | 0,036 ; p ≥ 0,10 (non rejet) | stationnaire |
+| Prix QQQ différenciés | −11,61 ; p ≤ 0,01 (rejet) | 0,108 ; p ≥ 0,10 (non rejet) | stationnaire |
+| Rendements AAPL | −11,81 ; p ≤ 0,01 (rejet) | 0,224 ; p ≥ 0,10 (non rejet) | stationnaire |
+| Rendements QQQ | −11,32 ; p ≤ 0,01 (rejet) | 0,092 ; p ≥ 0,10 (non rejet) | stationnaire |
+
+Les deux tests s'accordent : les **prix sont non stationnaires** (racine unitaire) et deviennent **stationnaires après une différenciation**. Les prix d'AAPL et de QQQ sont donc intégrés d'ordre 1, I(1), et l'ordre de différenciation nécessaire est **d = 1**. Les rendements logarithmiques, qui sont une quasi-différence des log-prix, sont stationnaires et peuvent être modélisés directement (VAR, GARCH). Remarque : `adf.test` et `kpss.test` (package `tseries`) tronquent les p-values à 0,01 et 0,10 ; on écrit donc « p ≤ 0,01 » et « p ≥ 0,10 ».
+
+## 2.5. Décomposition exploratoire des rendements AAPL
+
+La fréquence 20 est utilisée comme approximation d'un cycle de 20 séances de bourse. La décomposition est exploratoire et ne suffit pas à prouver l'existence d'une saisonnalité stable.
+
+```{r decompose}
+decomposition <- decompose(
+  ts(as.numeric(na.omit(train[, "AAPL_Return"])), frequency = 20),
+  type = "additive"
+)
+plot(decomposition)
+```
+
+**Interprétation.**
+
+- **Tendance** : elle oscille autour de zéro (entre environ −0,015 et +0,015) sans orientation durable : les rendements n'ont pas de tendance. Ses fluctuations suivent les phases de marché (forte baisse au début de 2020, creux début 2025). Ce n'est pas une tendance au sens d'un trend, mais l'effet de moyenne mobile des rendements.
+- **Saisonnalité** : la composante saisonnière est un motif parfaitement répété tous les 20 séances (c'est la définition de `decompose`), mais son amplitude est minuscule (environ ±0,003) comparée à celle des rendements observés (jusqu'à ±0,10 à +0,14). Elle n'a donc **aucune importance pratique** et n'est pas la preuve d'une saisonnalité réelle : la fréquence de 20 jours est choisie arbitrairement.
+- **Composante aléatoire** : elle reprend pratiquement toute la variabilité de la série observée, avec des regroupements nets de forte variance (début 2020 et début 2025 notamment), ce qui annonce les effets ARCH testés en section 3.
+
+Il n'y a donc pas lieu d'estimer un SARIMA (voir section 3.1).
+
+## 2.6. Évolution des rendements et de la volatilité
+
+```{r evolution}
+plot(train[, "AAPL_Return"],
+     main = "Évolution des rendements AAPL",
+     xlab = "Date", ylab = "Rendement logarithmique")
+abline(h = 0, lty = 2)
+
+plot(train[, "AAPL_Volatility20"],
+     main = "Évolution de la volatilité glissante AAPL",
+     xlab = "Date", ylab = "Volatilité sur 20 séances")
+```
+
+**Interprétation.** Les rendements oscillent autour de zéro avec des amplitudes variables dans le temps : la volatilité est groupée (grappes de forts rendements positifs ou négatifs). La volatilité glissante confirme que la variance n'est pas constante, ce qui sera confirmé par les tests ARCH-LM en section 3.
+
+# 3. Modélisation classique et diagnostics
+
+## 3.1. Sélection et estimation d'un modèle ARIMA
+
+### Identification manuelle (ACF/PACF)
+
+D'après la section 2, les prix d'AAPL sont I(1) (**d = 1**), et l'ACF/PACF de la série différenciée ne montre pas de structure autorégressive ou moyenne mobile significative (**p = q = 0**). L'identification manuelle conduit donc à un **ARIMA(0,1,0)**, c'est-à-dire une marche aléatoire, éventuellement avec dérive.
+
+### Identification automatique
+
+`auto.arima()` sélectionne un modèle candidat selon un critère d'information. La saisonnalité est désactivée (`seasonal = FALSE`) : voir la justification plus bas.
+
+```{r auto-arima}
+arima_auto <- auto.arima(
+  na.omit(train[, "AAPL"]),
+  seasonal = FALSE,
+  stepwise = TRUE,
+  trace = TRUE
+)
+
+summary(arima_auto)
+
+ordres <- as.numeric(arimaorder(arima_auto)[1:3])
+cat("Ordre ARIMA sélectionné (p, d, q) :", ordres, "\n")
+p <- ordres[1]
+d <- ordres[2]
+q <- ordres[3]
+
+# On conserve exactement le modèle choisi par auto.arima (avec dérive) pour tous les diagnostics
+model_arima <- arima_auto
+```
+
+**Comparaison des deux approches.** L'identification manuelle et la recherche automatique donnent le **même ordre (0,1,0)**. La seule différence est la présence d'une **dérive** (drift) retenue par `auto.arima` : elle vaut 0,134 $ par jour (erreur standard 0,067), soit un rapport t ≈ 2,0, à la limite de la significativité à 5 %. La dérive représente la hausse moyenne quotidienne du prix sur la période d'apprentissage. Dans la trace d'`auto.arima`, le critère (approché) est de 8 553,0 avec dérive contre 8 555,0 sans dérive. L'AIC et le BIC exacts sont comparés dans le tableau de la section 3.3.
+
+### Pourquoi pas de SARIMA ?
+
+Un SARIMA n'est pertinent que si la série présente une saisonnalité stable. Ce n'est pas le cas pour des prix boursiers journaliers : aucune saisonnalité n'apparaît dans la décomposition (section 2.5) ni dans l'ACF (pas de pics périodiques). Le terme saisonnier $(P,D,Q)_s$ est donc **volontairement écarté**, ce qui est cohérent avec `seasonal = FALSE`.
+
+## 3.2. Diagnostics des résidus ARIMA
+
+```{r arima-resid}
+residuals_arima <- residuals(model_arima)
+
+plot(residuals_arima,
+     main = "Résidus du modèle ARIMA",
+     xlab = "Date", ylab = "Résidu")
+
+ljung_box_10 <- Box.test(na.omit(residuals_arima), lag = 10,
+                         type = "Ljung-Box", fitdf = p + q)
+ljung_box_20 <- Box.test(na.omit(residuals_arima), lag = 20,
+                         type = "Ljung-Box", fitdf = p + q)
+ljung_box_10
+ljung_box_20
+
+jb_test <- jarque.bera.test(na.omit(as.numeric(residuals_arima)))
+cat("Statistique Jarque-Bera :", as.numeric(jb_test$statistic), "\n")
+cat("p-value Jarque-Bera :", jb_test$p.value, "\n")
+
+arch_test <- ArchTest(na.omit(as.numeric(residuals_arima)), lags = 10)
+arch_test
+```
+
+**Interprétation de chaque test.**
+
+- **Ljung-Box (indépendance des résidus)** — H0 : pas d'autocorrélation. Les p-values valent 0,065 (retard 10) et 0,070 (retard 20), toutes deux supérieures à 5 % : on **ne rejette pas** l'absence d'autocorrélation. Elles restent toutefois proches du seuil : une faible autocorrélation résiduelle ne peut pas être totalement exclue. En pratique, l'autocorrélation d'ordre 1 des résidus est négligeable (0,018), donc l'ARIMA(0,1,0) capte correctement la dépendance linéaire.
+- **Jarque-Bera (normalité)** — H0 : résidus normaux. La statistique est très élevée (≈ 5 152) et la p-value est quasi nulle : on **rejette la normalité**. Les résidus ont des queues épaisses, ce qui est cohérent avec la kurtosis de 9,5 observée sur les rendements.
+- **ARCH-LM (homoscédasticité conditionnelle)** — H0 : pas d'effet ARCH. La statistique vaut 265,45 (10 degrés de liberté) et la p-value est inférieure à 2,2e-16 : on **rejette l'homoscédasticité**. La variance des résidus dépend de son passé.
+
+**Conclusion.** L'ARIMA(0,1,0) avec dérive est adéquat pour la **moyenne** (pas d'autocorrélation résiduelle significative), mais pas pour la **variance** : les résidus sont non normaux et présentent de forts effets ARCH. Les intervalles de prédiction ARIMA, qui supposent une variance constante, seraient donc peu fiables. C'est ce qui justifie la modélisation GARCH (section 3.6).
+
+## 3.3. Comparaison de modèles ARIMA candidats
+
+Les critères AIC et BIC permettent de comparer ces modèles sur le même échantillon d'entraînement. Une valeur plus faible est préférable, sans remplacer les diagnostics et l'évaluation prédictive.
+
+```{r arima-compare}
+modele_010 <- Arima(na.omit(train[, "AAPL"]), order = c(0, 1, 0), include.drift = TRUE)
+modele_110 <- Arima(na.omit(train[, "AAPL"]), order = c(1, 1, 0), include.drift = TRUE)
+modele_011 <- Arima(na.omit(train[, "AAPL"]), order = c(0, 1, 1), include.drift = TRUE)
+modele_111 <- Arima(na.omit(train[, "AAPL"]), order = c(1, 1, 1), include.drift = TRUE)
+modele_010_sans_drift <- Arima(na.omit(train[, "AAPL"]), order = c(0, 1, 0), include.drift = FALSE)
+
+comparaison_arima <- data.frame(
+  Modele = c("ARIMA(0,1,0) avec dérive", "ARIMA(1,1,0) avec dérive",
+             "ARIMA(0,1,1) avec dérive", "ARIMA(1,1,1) avec dérive",
+             "ARIMA(0,1,0) sans dérive"),
+  AIC = c(AIC(modele_010), AIC(modele_110), AIC(modele_011),
+          AIC(modele_111), AIC(modele_010_sans_drift)),
+  BIC = c(BIC(modele_010), BIC(modele_110), BIC(modele_011),
+          BIC(modele_111), BIC(modele_010_sans_drift))
+)
+
+comparaison_arima <- comparaison_arima[order(comparaison_arima$AIC), ]
+knitr::kable(comparaison_arima, digits = 3, row.names = FALSE,
+             caption = "Comparaison des modèles ARIMA selon AIC et BIC")
+
+cat("Modèle sélectionné automatiquement :\n")
+print(arima_auto)
+print(arimaorder(arima_auto))
+```
+
+**Interprétation.**
+
+- Parmi les modèles avec dérive, l'**ARIMA(0,1,0)** a le plus petit AIC (8 555,0) et le plus petit BIC (8 566,0). Ajouter un terme AR ou MA augmente l'AIC de 1,5 à 3,4 points sans amélioration de la vraisemblance : ces termes ne sont pas utiles (principe de parcimonie).
+- Le modèle **sans dérive** a un AIC plus élevé (8 557,1) mais un BIC plus faible (8 562,5) : l'AIC retient la dérive, le BIC (plus pénalisant) ne la retient pas. Cette divergence est cohérente avec une dérive à la limite de la significativité (t ≈ 2,0).
+- **Choix retenu** : ARIMA(0,1,0) **avec dérive**, qui est le modèle sélectionné par `auto.arima`, et dont les diagnostics ont été faits en section 3.2. L'écart entre les deux versions est faible (0,13 $ par jour en moyenne) et leur ordre est identique ; la comparaison des prévisions relève de la section 6.
+
+## 3.4. Modèle VAR sur les rendements et causalité de Granger
+
+Le VAR modélise conjointement les rendements AAPL et QQQ. Il est estimé sur les **rendements** (stationnaires) et non sur les prix (non stationnaires). L'ordre est choisi à partir des critères d'information.
+
+```{r var-select}
+rendements_var <- as.matrix(na.omit(train[, c("AAPL_Return", "QQQ_Return")]))
+
+selection_var <- VARselect(rendements_var, lag.max = 10, type = "const")
+print(selection_var$selection)
+
+p_aic <- as.integer(selection_var$selection["AIC(n)"])
+p_bic <- as.integer(selection_var$selection["SC(n)"])
+cat("Ordre AIC :", p_aic, "| Ordre BIC (SC) :", p_bic, "\n")
+
+modele_var     <- VAR(rendements_var, p = p_aic, type = "const")  # modèle principal
+modele_var_bic <- VAR(rendements_var, p = p_bic, type = "const")  # modèle de comparaison
+
+summary(modele_var)
+
+# Stabilité : toutes les racines doivent être de module inférieur à 1
+print(roots(modele_var))
+print(roots(modele_var_bic))
+```
+
+**Choix de l'ordre.** Les critères ne s'accordent pas : l'AIC et le FPE retiennent **9 retards**, tandis que HQ et le BIC (SC) retiennent **1 retard**. Les deux modèles sont donc estimés et comparés par leurs diagnostics (voir plus bas). Le VAR(9) est retenu comme modèle principal pour deux raisons : il correspond au critère AIC demandé, et surtout il est le seul dont les résidus ne présentent pas d'autocorrélation (le test de Portmanteau rejette l'absence d'autocorrélation pour le VAR(1), p ≈ 2e-6, mais pas pour le VAR(9), p = 0,83). La parcimonie du BIC est donc trop forte ici. **Réserve** : le VAR(9) compte 18 coefficients par équation et la plupart ne sont pas individuellement significatifs, avec un R² faible (4,2 % pour l'équation AAPL, 5,6 % pour QQQ ; R² ajustés 3,2 % et 4,6 %). Le risque de surajustement est réel, mais limité par la taille de l'échantillon (1 742 observations).
+
+**Stabilité.** Toutes les racines du polynôme caractéristique sont de module inférieur à 1 (maximum ≈ 0,86 pour le VAR(9) ; ≈ 0,13 pour le VAR(1)) : les deux VAR sont stables (stationnaires).
+
+### Causalité de Granger
+
+Le test de Granger examine si les valeurs passées d'une série apportent une information prédictive supplémentaire pour l'autre, conditionnellement au VAR. Il ne prouve pas une causalité économique au sens strict. La causalité instantanée (`$Instant`) est aussi affichée.
+
+```{r granger}
+granger_var <- function(m, nom) {
+  cat("\n=====", nom, "=====\n")
+  for (v in c("AAPL_Return", "QQQ_Return")) {
+    g <- causality(m, cause = v)
+    print(g$Granger)
+    print(g$Instant)
+  }
+}
+
+granger_var(modele_var,     paste0("VAR(", p_aic, ") - AIC"))
+granger_var(modele_var_bic, paste0("VAR(", p_bic, ") - BIC"))
+```
+
+**Interprétation.**
+
+| Hypothèse nulle (H0) | VAR(9), AIC | VAR(1), BIC | Conclusion à 5 % |
+|---|---|---|---|
+| AAPL ne cause pas QQQ (Granger) | p = 0,362 | p = 0,090 | non rejetée |
+| QQQ ne cause pas AAPL (Granger) | p = 0,001 | p = 0,029 | **rejetée** |
+| Pas de causalité instantanée | p < 2,2e-16 | p < 2,2e-16 | **rejetée** |
+
+- **QQQ → AAPL** : les rendements passés de QQQ aident à prédire les rendements d'AAPL au-delà de l'historique d'AAPL lui-même. Ce résultat est **robuste** : il est obtenu avec les deux ordres de VAR. Dans le VAR(9), les coefficients significatifs sont ceux de QQQ aux retards 1 (−0,106 ; p = 0,046), 2 (+0,130 ; p = 0,015) et 7 (+0,149 ; p = 0,005), de signes alternés : l'effet est faible et sans schéma économique simple.
+- **AAPL → QQQ** : non significatif à 5 % dans les deux modèles (p = 0,36 et 0,09). La relation de prédictivité est donc **unidirectionnelle** : QQQ précède AAPL, et non l'inverse.
+- **Causalité instantanée** : très forte (χ² ≈ 696 ; corrélation des résidus = 0,82). L'essentiel du co-mouvement entre AAPL et QQQ se produit **le même jour**, ce qu'un modèle à retards ne peut pas prédire.
+- **Limites** : Granger mesure une capacité prédictive, pas une causalité économique ; Apple fait partie de l'indice, donc les rendements de QQQ contiennent en partie ceux d'AAPL. De plus, la faible valeur du R² montre que la prévisibilité linéaire des rendements est très limitée. Enfin, les tests F supposent une variance constante : puisque les résidus présentent des effets ARCH (voir ci-dessous), les p-values sont approximatives (celle de 0,001 reste néanmoins très faible).
+
+### Diagnostics du VAR
+
+```{r var-diag}
+diag_var <- function(m, nom) {
+  cat("\n=====", nom, "=====\n")
+  print(serial.test(m, lags.pt = 20, type = "PT.adjusted"))
+  print(arch.test(m, lags.multi = 10))
+  print(normality.test(m, multivariate.only = TRUE))
+}
+
+diag_var(modele_var,     paste0("VAR(", p_aic, ") - AIC"))
+diag_var(modele_var_bic, paste0("VAR(", p_bic, ") - BIC"))
+```
+
+**Interprétation.** Le test de Portmanteau est fait avec 20 retards, supérieur à l'ordre p = 9, pour que le test ait des degrés de liberté suffisants (44 pour le VAR(9) ; avec 10 retards, il n'en aurait eu que 4).
+
+| Test (H0) | VAR(9) | VAR(1) | Conclusion |
+|---|---|---|---|
+| Portmanteau (pas d'autocorrélation) | χ² = 35,1 ; p = 0,83 | χ² = 147,1 ; p ≈ 2e-6 | VAR(9) valide, VAR(1) rejeté |
+| ARCH multivarié (pas d'effet ARCH) | χ² = 559,3 ; p < 2,2e-16 | χ² = 587,2 ; p < 2,2e-16 | effets ARCH présents |
+| Jarque-Bera multivarié (normalité) | χ² = 2 112 ; p < 2,2e-16 | χ² = 2 949 ; p < 2,2e-16 | non-normalité |
+
+- **Autocorrélation** : les résidus du VAR(9) sont non autocorrélés ; ceux du VAR(1) ne le sont pas, ce qui confirme le choix du VAR(9).
+- **Effets ARCH** : présents dans les deux modèles, en cohérence avec le résultat univarié de la section 3.2.
+- **Normalité** : rejetée ; la composante de kurtosis explique l'essentiel de la statistique (≈ 2 067 contre ≈ 46 pour l'asymétrie dans le VAR(9)) : les résidus ont des queues épaisses.
+- **Conséquence** : les estimations des coefficients restent valables, mais les erreurs standard et les tests (dont Granger) sont approchés. Un modèle de volatilité conditionnelle est nécessaire (section 3.6).
+
+## 3.5. Test de cointégration de Johansen
+
+Le test de Johansen recherche une relation de cointégration entre les **niveaux** des prix (non stationnaires, I(1)). Le rang de cointégration est déterminé à partir des statistiques de test et des valeurs critiques, en commençant par $r=0$.
+
+```{r johansen}
+prix_cointegration <- as.matrix(na.omit(train[, c("AAPL", "QQQ")]))
+
+# Choix de K : ordre du VAR estimé sur les niveaux
+selection_niveaux <- VARselect(prix_cointegration, lag.max = 10, type = "const")
+print(selection_niveaux$selection)
+
+# Johansen avec K = 2
+test_johansen <- ca.jo(
+  prix_cointegration,
+  type = "trace", ecdet = "const", K = 2, spec = "transitory"
+)
+summary(test_johansen)
+
+# Robustesse : K = 3
+test_johansen_k3 <- ca.jo(
+  prix_cointegration,
+  type = "trace", ecdet = "const", K = 3, spec = "transitory"
+)
+summary(test_johansen_k3)
+
+# Test de Phillips-Ouliaris (de type Engle-Granger) ; H0 : pas de cointégration
+print(po.test(prix_cointegration))
+```
+
+**Choix des paramètres.** Le nombre de retards K est choisi à partir d'un VAR sur les niveaux : HQ retient 2, le BIC retient 1 et l'AIC retient 5 (K doit être au moins égal à 2 pour `ca.jo`). On retient **K = 2** (HQ), compromis entre parcimonie et AIC, et on teste **K = 3** pour vérifier la robustesse. La spécification `ecdet = "const"` autorise une constante dans la relation de long terme (adaptée à deux prix avec des niveaux différents).
+
+**Interprétation.**
+
+| Hypothèse | Statistique (K = 2) | Statistique (K = 3) | Valeurs critiques 10 % / 5 % / 1 % |
+|---|---|---|---|
+| r = 0 | 15,76 | 13,85 | 17,85 / 19,96 / 24,60 |
+| r ≤ 1 | 2,23 | 2,23 | 7,52 / 9,24 / 12,97 |
+
+- On commence par $r=0$ : la statistique (15,76 pour K = 2 et 13,85 pour K = 3) est **inférieure à la valeur critique même à 10 %** (17,85). L'hypothèse de **non-cointégration n'est pas rejetée**, quel que soit K.
+- Le test de Phillips-Ouliaris, de type Engle-Granger, conduit à la même conclusion (statistique −8,49 ; p ≥ 0,15, non rejet de l'absence de cointégration).
+- **Conclusion** : trois tests concordants ne trouvent **pas de preuve de relation d'équilibre de long terme** entre AAPL et QQQ sur la période d'apprentissage. Les vecteurs propres et la matrice de chargement affichés ne doivent donc pas être interprétés. **Aucun VECM n'est estimé** : le sujet l'exige uniquement si une cointégration est détectée, et on ne fixe pas $r=1$ sans justification statistique.
+- **Conséquence pour le VAR** : puisqu'il n'y a pas de cointégration, estimer le VAR sur les rendements (en différences) est justifié, sans perte d'information liée à un terme de correction d'erreur.
+- **Nuance (honnêteté scientifique)** : l'exemple du sujet suggère qu'une action et son indice peuvent être cointégrés. Ce n'est pas le cas ici. Une explication plausible, non testée, est que les prix d'Apple sont aussi portés par des facteurs propres (résultats, cycles produits) qui font dériver l'écart entre AAPL et l'indice sur la période. Le test de Johansen peut aussi manquer de puissance sur un échantillon fini, et la conclusion dépend de la spécification (K = 5, suggéré par l'AIC, n'a pas été testé).
+
+## 3.6. Modèle GARCH(1,1) sur les rendements AAPL
+
+Le modèle GARCH(1,1) permet de modéliser une volatilité conditionnelle évoluant dans le temps. Les rendements sont multipliés par 100 pour l'estimation numérique, puis la volatilité estimée est reconvertie à l'échelle initiale. Le recours à un GARCH est justifié par les tests ARCH-LM significatifs obtenus sur les résidus de l'ARIMA (section 3.2) et du VAR (section 3.4). La loi de Student (`std`) est choisie pour tenir compte des queues épaisses (kurtosis de 9,5, Jarque-Bera rejeté).
+
+```{r garch}
+rendements_aapl <- na.omit(train[, "AAPL_Return"])
+
+fit_garch <- function(ordre) {
+  spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = ordre),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  ugarchfit(spec = spec, data = as.numeric(rendements_aapl) * 100,
+            solver = "hybrid")
+}
+
+modele_garch <- fit_garch(c(1, 1))
+show(modele_garch)
+```
+
+**Interprétation des paramètres (GARCH(1,1) Student).**
+
+- Tous les paramètres sont **très significatifs** (p < 0,002), y compris avec les erreurs standard robustes.
+- $\alpha_1 = 0{,}097$ : un choc de rendement augmente la volatilité du lendemain (réaction aux chocs) ; $\beta_1 = 0{,}871$ : la volatilité est très persistante.
+- $\alpha_1+\beta_1 = 0{,}968 < 1$ : le processus est stationnaire en variance mais **très persistant** : un choc de volatilité met environ 21 jours de bourse à perdre la moitié de son effet. La volatilité inconditionnelle vaut $\omega/(1-\alpha_1-\beta_1) \approx 3{,}97$ (en %²), soit environ 2,0 % par jour (≈ 32 % annualisé).
+- Paramètre de forme de la loi de Student ≈ 4,8 : valeur faible, qui confirme des queues très épaisses et justifie ce choix plutôt qu'une loi normale.
+
+### Critères d'information et choix de l'ordre
+
+```{r garch-compare}
+print(infocriteria(modele_garch))
+
+ordres_garch <- list(
+  "GARCH(1,1)" = c(1, 1),
+  "GARCH(1,2)" = c(1, 2),
+  "GARCH(2,1)" = c(2, 1)
+)
+
+comparaison_garch <- do.call(rbind, lapply(names(ordres_garch), function(nm) {
+  ic <- infocriteria(fit_garch(ordres_garch[[nm]]))
+  data.frame(Modele = nm, AIC = ic["Akaike", 1], BIC = ic["Bayes", 1])
+}))
+knitr::kable(comparaison_garch, digits = 4, row.names = FALSE,
+             caption = "Comparaison d'ordres GARCH (critères par observation)")
+```
+
+**Interprétation.** Les AIC sont quasi identiques (3,8824 ; 3,8821 ; 3,8825) : la différence de 0,0003 entre GARCH(1,1) et GARCH(1,2) est négligeable. Le **BIC est le plus faible pour le GARCH(1,1)** (3,8980 contre 3,9008 et 3,9012). Aucun ordre supérieur n'apporte donc d'amélioration notable, et le diagnostic des résidus (ci-dessous) ne montre aucun problème résiduel : le **GARCH(1,1) est conservé** (parcimonie).
+
+### Volatilité conditionnelle estimée
+
+```{r garch-vol}
+volatilite_garch <- sigma(modele_garch) / 100
+
+plot(index(rendements_aapl), as.numeric(volatilite_garch),
+     type = "l",
+     main = "Volatilité conditionnelle — GARCH(1,1)",
+     xlab = "Date", ylab = "Volatilité conditionnelle")
+
+# Événements connus (dates indicatives) : les deux pics les plus nets
+abline(v = as.Date(c("2020-03-16", "2025-04-03")),
+       col = "red", lty = 2)
+legend("topright",
+       legend = c("Volatilité conditionnelle", "COVID-19 (mars 2020) / droits de douane (avril 2025)"),
+       col = c("black", "red"), lty = c(1, 2), cex = 0.7)
+```
+
+**Interprétation.** La volatilité conditionnelle estimée varie fortement dans le temps : elle reste le plus souvent entre 1 % et 2,5 % par jour, avec quelques pics nets.
+
+- **Mars 2020 (COVID-19)** : c'est le pic maximal, à **environ 7 %** de volatilité quotidienne, soit plus de trois fois sa valeur inconditionnelle (≈ 2 %). Il correspond au krach de la pandémie.
+- **Avril 2025 (droits de douane)** : second pic très net, à **environ 5,8 %**, lié au choc des annonces de droits de douane.
+- **2022 (hausse des taux d'intérêt)** : pas de pic spectaculaire mais une volatilité durablement plus élevée (plusieurs pics de 3 % à 3,6 % environ en cours d'année), ce qui est cohérent avec le marché baissier des valeurs technologiques de cette période.
+- **Autres épisodes** : un pic secondaire d'environ 3,7 % à l'automne 2020, et une valeur initiale élevée (≈ 3,8 %) en début d'échantillon, en partie due à l'initialisation du modèle.
+- Après chaque pic, la volatilité décroît progressivement vers son niveau habituel, ce qui illustre la forte persistance mesurée par $\alpha_1+\beta_1 = 0{,}968$ (demi-vie d'environ 21 jours). On observe aussi des périodes très calmes (2021, 2023-2024) proches de 1 % à 1,5 %.
+
+### Diagnostics des résidus standardisés
+
+```{r garch-diag}
+residus_std <- as.numeric(residuals(modele_garch, standardize = TRUE))
+
+plot(residus_std, type = "l",
+     main = "Résidus standardisés du GARCH(1,1)",
+     xlab = "Temps", ylab = "Résidu standardisé")
+
+# QQ-plot des résidus standardisés par rapport à la loi de Student estimée
+plot(modele_garch, which = 9)
+
+# Autocorrélation des résidus standardisés
+Box.test(residus_std, lag = 10, type = "Ljung-Box")
+
+# Autocorrélation des résidus standardisés au carré
+Box.test(residus_std^2, lag = 10, type = "Ljung-Box")
+
+# Effets ARCH résiduels
+ArchTest(residus_std, lags = 10)
+```
+
+**Interprétation.** Les résidus standardisés doivent redevenir homoscédastiques et non autocorrélés si la volatilité est correctement modélisée :
+
+| Test (H0) | Statistique | p-value | Conclusion |
+|---|---|---|---|
+| Ljung-Box sur les résidus (pas d'autocorrélation) | 7,18 | 0,709 | non rejetée |
+| Ljung-Box sur les résidus au carré | 7,60 | 0,668 | non rejetée |
+| ARCH-LM (pas d'effet ARCH résiduel) | 9,31 | 0,503 | non rejetée |
+
+- Aucun test ne rejette son hypothèse nulle : il ne reste **ni autocorrélation, ni effet ARCH résiduel**. Le contraste est net avec les résidus de l'ARIMA (ARCH-LM = 265,45, p < 2,2e-16) : le GARCH a absorbé l'hétéroscédasticité conditionnelle.
+- Les tests complémentaires de la sortie `rugarch` vont dans le même sens : tests de Ljung-Box pondérés (p entre 0,62 et 0,95), ARCH-LM pondérés (p entre 0,31 et 0,67), **test du signe** (Sign Bias) non significatif (p conjoint = 0,31) — il n'y a pas d'effet de levier significatif, donc pas besoin d'un modèle asymétrique de type GJR ou EGARCH — et **test d'adéquation de la loi** (Adjusted Pearson) non rejeté (p entre 0,57 et 0,95) : la loi de Student est adaptée.
+- **Limite — stabilité des paramètres** : le test de Nyblom rejette la constance des paramètres (statistique conjointe 2,19, supérieure à la valeur critique à 1 % de 1,88 ; le paramètre de forme dépasse la valeur critique à 1 %, et $\mu$, $\alpha_1$, $\beta_1$ dépassent celle à 5 %). Les paramètres ne sont pas parfaitement stables sur 2019-2025, ce qui est plausible avec des régimes de marché très différents (période COVID, hausse des taux, période calme). Cela relativise la qualité des prévisions de volatilité sur le long terme et suggère de ré-estimer le modèle régulièrement.
+
+# Conclusion de la section 3
+
+## Récapitulatif des modèles retenus et justification des choix
+
+| Élément | Choix retenu | Justification et vérification |
+|---|---|---|
+| Ordre de différenciation | d = 1 pour les prix, rendements log pour VAR et GARCH | ADF et KPSS concordants : prix I(1), différences et rendements stationnaires |
+| ARIMA | ARIMA(0,1,0) avec dérive | Identifié à la fois par ACF/PACF et par `auto.arima` ; plus faible AIC/BIC parmi les candidats avec dérive ; Ljung-Box non rejeté |
+| SARIMA | non retenu | Pas de saisonnalité (décomposition et ACF) pour des données boursières journalières |
+| VAR | VAR(9) sur les rendements | Ordre AIC ; seul modèle sans autocorrélation résiduelle (Portmanteau, p = 0,83) ; VAR(1) rejeté (p ≈ 2e-6) |
+| Granger | QQQ → AAPL significatif, AAPL → QQQ non | Résultat identique avec VAR(9) et VAR(1) ; p-values approchées (hétéroscédasticité) |
+| Cointégration | non détectée, pas de VECM | Johansen (K = 2 et K = 3) et Phillips-Ouliaris concordants |
+| GARCH | GARCH(1,1) avec loi de Student | Effets ARCH dans les résidus ARIMA et VAR ; BIC minimal ; résidus standardisés sans ARCH ni autocorrélation |
+
+## Synthèse
+
+- Les prix d'AAPL et de QQQ sont non stationnaires et intégrés d'ordre 1. Leurs rendements sont stationnaires, à queues épaisses et à variance groupée.
+- Pour la **moyenne**, un simple ARIMA(0,1,0) avec dérive (marche aléatoire avec dérive) suffit : la dépendance linéaire des rendements d'AAPL est très faible (quelques autocorrélations de l'ordre de 0,08 en valeur absolue aux retards 1, 8 et 9). Le VAR révèle seulement une faible prévisibilité d'AAPL par les rendements passés de QQQ (R² de l'ordre de 4 à 6 %).
+- Pour la **variance**, les résidus des modèles de moyenne (ARIMA, VAR) présentent de forts effets ARCH et ne sont pas normaux. Le GARCH(1,1) à loi de Student les modélise correctement, avec une forte persistance (demi-vie ≈ 21 jours).
+- Il n'y a **pas de relation de long terme** (cointégration) entre AAPL et QQQ sur l'échantillon d'apprentissage.
+
+## Limites
+
+- Les résidus de tous les modèles de moyenne sont non normaux et hétéroscédastiques : les intervalles de prédiction ARIMA et les tests de Granger ne sont qu'approximatifs.
+- Le VAR(9) compte beaucoup de paramètres pour un gain de prévisibilité modeste.
+- Les paramètres du GARCH ne sont pas stables sur toute la période (test de Nyblom).
+- La conclusion sur la cointégration dépend du test et de la spécification retenus (K, constante) et de la période étudiée.
+- Les qualités prédictives de ces modèles ne sont pas évaluées ici : la prévision comparative sur l'échantillon de test (MSE, RMSE, MAE, MAPE, test de Diebold-Mariano) sera traitée en **section 6**, hors du présent document.
+
+## Reproductibilité
+
+```{r session}
+sessionInfo()
+```
