@@ -1,0 +1,16 @@
+Tu es un expert en séries temporelles financières. Je prépare un mini-projet académique (cours Séries Temporelles, Data Science & IA). Voici les statistiques de mes données ; je veux des HYPOTHÈSES DE MODÈLES À TESTER, pas des prévisions.
+
+DONNÉES
+- Séries : prix ajustés (Adj Close) journaliers de AAPL et QQQ, du 2019-01-02 au 2026-09-30 (1947 observations). Apprentissage : 1752 observations (jusqu'au 2025-12-18) ; test : 195 observations.
+- Rendements logarithmiques (1946 observations, échantillon complet) :
+  AAPL : moyenne 0.001123 ; écart-type 0.019309 ; min -0.137708 ; Q1 -0.007782 ; médiane 0.001301 ; Q3 0.011201 ; max 0.142617 ; skewness -0.1201 ; kurtosis en excès 6.5079
+  QQQ  : moyenne 0.000828 ; écart-type 0.015073 ; min -0.127593 ; Q1 -0.006139 ; médiane 0.001404 ; Q3 0.008745 ; max 0.113356 ; skewness -0.3657 ; kurtosis en excès 7.2799
+- Tests de stationnarité (échantillon d'apprentissage) :
+  ADF (H0 = racine unitaire) : AAPL prix stat -0.7299 p 0.8388 ; QQQ prix stat 0.0065 p 0.9591 ; AAPL rendements stat -13.5753 p 2.2e-25 ; QQQ rendements stat -13.2064 p 1.1e-24
+  KPSS (H0 = stationnarité autour d'une constante) : AAPL prix stat 5.9976 p 0.01 ; QQQ prix stat 5.4912 p 0.01 ; AAPL rendements stat 0.2135 p 0.10 ; QQQ rendements stat 0.0903 p 0.10 (p-values KPSS tronquées aux bornes de la table : 0.01 et 0.10)
+- Lectures graphiques (approximatives) : ACF des prix : décroissance très lente (environ 0.88 au lag 40) ; ACF des rendements : autocorrélations faibles, lag 1 environ -0.08 (AAPL) et -0.13 (QQQ), quelques pics isolés aux lags 7 à 9 ; volatilité glissante 20 jours d'AAPL : regroupements marqués, pics vers 0.068 (mars 2020) et 0.05 (avril 2025), plancher vers 0.006.
+
+DEMANDE
+1. Propose une liste hiérarchisée d'hypothèses de modèles à tester (classiques d'abord, puis neuronaux). Pour chaque hypothèse : énoncé, justification chiffrée tirée UNIQUEMENT des données ci-dessus, test de validation à appliquer, risque principal.
+2. Signale explicitement toute information manquante dont tu aurais besoin ; n'invente aucune statistique.
+3. Termine par 3 limites de ta propre analyse.

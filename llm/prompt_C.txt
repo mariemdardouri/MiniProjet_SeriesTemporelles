@@ -1,0 +1,18 @@
+Cadre : exercice PÉDAGOGIQUE de simulation dans un cours de séries temporelles. Ce n'est PAS un conseil financier réel.
+Voici des prévisions produites par plusieurs modèles sur l'action Apple (AAPL). Étapes OBLIGATOIRES, dans cet ordre :
+1. AVANT toute recommandation, liste TOI-MÊME au moins 6 limites et risques de ces prévisions et de toute recommandation qui en découlerait.
+2. Puis propose 3 recommandations d'investissement SIMULÉES (position, taille relative, horizon, condition d'arrêt), en citant pour chacune les chiffres ci-dessous sur lesquels elle s'appuie.
+3. Ne présente jamais une prévision comme certaine. N'invente AUCUN chiffre ; si une information manque, dis-le.
+
+DONNÉES
+- Dernière observation : 2026-09-30, prix ajusté AAPL = 333.02. Prévisions pour le jour de bourse suivant (J+1) :
+  - ARIMA(0,1,0) / naïf : rendement prévu J+1 = +0.000 % ; RMSE_ret test = 0.01659 ; Hit test = n/a (prévoit 0) ; verdict vs marche aléatoire = référence
+  - Marche aléatoire + dérive : rendement prévu J+1 = +0.112 % ; RMSE_ret test = 0.01655 ; Hit test = 0.528 ; verdict vs marche aléatoire = différence non significative
+  - LSTM : rendement prévu J+1 = +0.133 % ; RMSE_ret test = 0.01664 ; Hit test = 0.523 ; verdict vs marche aléatoire = différence non significative
+  - GRU : rendement prévu J+1 = +0.232 % ; RMSE_ret test = 0.01644 ; Hit test = 0.569 ; verdict vs marche aléatoire = différence non significative
+  - LSTM+GARCH : rendement prévu J+1 = +0.141 % ; RMSE_ret test = 0.01664 ; Hit test = 0.528 ; verdict vs marche aléatoire = différence non significative
+  - GRU+GARCH : rendement prévu J+1 = +0.207 % ; RMSE_ret test = 0.01645 ; Hit test = 0.554 ; verdict vs marche aléatoire = différence non significative
+- Rendement quotidien moyen d'apprentissage : +0.112 % par jour.
+- Volatilité quotidienne prévue par le GARCH(1,1), J+1 à J+10 (en %) : 1.57, 1.58, 1.60, 1.61, 1.62, 1.64, 1.65, 1.66, 1.67, 1.68 ; volatilité cumulée sur 10 jours = 5.15 %.
+- Lien avec l'indice : QQQ « Granger-cause » AAPL (F = 3.11, p = 9.92e-04), pas l'inverse.
+- Le test a porté sur 195 jours (du 2025-12-19 au 2026-09-30).
